@@ -1,6 +1,8 @@
-// bridge.js — BOT Whats em nuvem (Baileys) chamando sua IA no Render
+// bridge.js — BOT Whats em nuvem (Baileys) chamando sua IA no Render (com HANDOFF para humano)
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') }); // opcional local; no Render usamos vars de ambiente
+
+const fs = require('fs'); // <— adicionado para handoff
 
 const baileys = require('@whiskeysockets/baileys');
 const makeWASocket = baileys.default;
@@ -12,11 +14,16 @@ const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
 const axios = require('axios');
 
+// ======= VARIÁVEIS DE AMBIENTE =======
 const APP_URL = (process.env.APP_URL || '').replace(/\/+$/, '');
 const ALLOW_GROUPS = String(process.env.ALLOW_GROUPS || 'false').toLowerCase() === 'true';
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 120000);
 const PORT = Number(process.env.PORT || 3000);
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth');
+
+// Handoff: tempo de pausa do bot (ms) e número do operador
+const HANDOFF_TTL_MS = parseInt(process.env.HANDOFF_TTL_MS || '3600000', 10); // 1h por padrão
+const OPERATOR_PHONE = (process.env.OPERATOR_PHONE || '').replace(/\D/g, ''); // ex.: +5592999999999
 
 if (!APP_URL) {
   console.error('Defina APP_URL (ex.: https://desfrut-ia.onrender.com)');
@@ -27,6 +34,7 @@ const logger = Pino({ level: 'info' });
 let lastQR = null;
 let isOpen = false;
 
+// ======= IA (sua API Flask no Render) =======
 async function callIA(question) {
   try {
     const res = await axios.post(`${APP_URL}/ask`, { question }, { timeout: TIMEOUT_MS });
@@ -46,6 +54,25 @@ function isGroup(jid) {
   return jid.endsWith('@g.us');
 }
 
+// ======= HANDOFF: utilitários e banco simples em arquivo =======
+const HANDOFF_DB = '/data/handoff.json';
+function waJid(phoneE164) {
+  const only = phoneE164.replace(/\D/g, '');
+  return `${only}@s.whatsapp.net`;
+}
+function loadJson(path, fallback) {
+  try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return fallback; }
+}
+function saveJson(path, obj) {
+  try { fs.writeFileSync(path, JSON.stringify(obj, null, 2)); } catch {}
+}
+let handoff = loadJson(HANDOFF_DB, {});
+function inHandoff(jid) {
+  const until = handoff[jid];
+  return typeof until === 'number' && Date.now() < until;
+}
+
+// ======= Conexão WhatsApp =======
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
@@ -76,6 +103,10 @@ async function startSock() {
     } else if (connection === 'open') {
       isOpen = true;
       logger.info('✅ Conectado ao WhatsApp!');
+      // Opcional: avisa o operador que o bot subiu
+      if (OPERATOR_PHONE) {
+        try { await sock.sendMessage(waJid(OPERATOR_PHONE), { text: '✅ Bot conectado e online.' }); } catch {}
+      }
     }
   });
 
@@ -101,6 +132,35 @@ async function startSock() {
     const cleaned = (text || '').trim();
     if (!cleaned) return;
 
+    const pushName = up.pushName || 'Cliente';
+
+    // ======= HANDOFF: comandos =======
+    if (/^(quero falar com atendente|falar com atendente|atendente|humano)\b/i.test(cleaned)) {
+      handoff[from] = Date.now() + HANDOFF_TTL_MS;
+      saveJson(HANDOFF_DB, handoff);
+      await sock.sendMessage(from, { text: 'Perfeito! Vou te conectar com um atendente humano agora. Você pode escrever por aqui. Para voltar ao autoatendimento depois, envie: "voltar".' });
+      if (OPERATOR_PHONE) {
+        await sock.sendMessage(waJid(OPERATOR_PHONE), { text: `⚠️ Handoff iniciado\nCliente: ${pushName} (${from})\nÚltima msg: “${cleaned}”` });
+      }
+      return; // pausa o fluxo de IA
+    }
+
+    if (/^voltar\b/i.test(cleaned)) {
+      delete handoff[from];
+      saveJson(HANDOFF_DB, handoff);
+      await sock.sendMessage(from, { text: 'Voltei ao autoatendimento 🤖. Como posso te ajudar?' });
+      return;
+    }
+
+    // Enquanto estiver em handoff, não responde como IA; apenas encaminha a msg ao operador
+    if (inHandoff(from)) {
+      if (OPERATOR_PHONE) {
+        await sock.sendMessage(waJid(OPERATOR_PHONE), { text: `📩 ${pushName} (${from}): “${cleaned}”` });
+      }
+      return;
+    }
+
+    // ======= utilidades e IA =======
     if (cleaned.toLowerCase() === 'ping') {
       await sock.sendMessage(from, { text: 'pong ✅' }, { linkPreview: false });
       return;
@@ -110,7 +170,7 @@ async function startSock() {
     await sock.sendMessage(from, { text: reply }, { linkPreview: false });
   });
 
-  // HTTP para QR e health
+  // ======= HTTP para QR e health =======
   const app = express();
 
   app.get('/healthz', (_req, res) => {
@@ -141,3 +201,4 @@ async function startSock() {
 }
 
 startSock().catch(err => console.error('Erro geral:', err));
+
