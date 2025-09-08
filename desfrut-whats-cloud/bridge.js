@@ -136,6 +136,18 @@ async function startSock() {
     if (!cleaned) return;
 
     const pushName = up.pushName || 'Cliente';
+    
+    // Escalonar automático se parecer problema/sinistro
+if (/(reclamaç|reclamacao|defeit|não funciona|nao funciona|quebrad|troca|devolver|procon)/i.test(cleaned)) {
+  handoff[from] = Date.now() + HANDOFF_TTL_MS;
+  saveJson(HANDOFF_DB, handoff);
+  await sock.sendMessage(from, { text: 'Sinto muito por isso! Vou te conectar com um atendente humano agora para resolver direitinho. Se preferir voltar ao autoatendimento depois, é só enviar: "voltar".' });
+  if (OPERATOR_PHONE) {
+    await sock.sendMessage(waJid(OPERATOR_PHONE), { text: `⚠️ Escalonado automaticamente\nCliente: ${pushName} (${from})\nMsg: “${cleaned}”` });
+  }
+  return;
+}
+
 
     // ======= HANDOFF: comandos =======
     if (/^(quero falar com atendente|falar com atendente|atendente|humano)\b/i.test(cleaned)) {
@@ -170,8 +182,11 @@ async function startSock() {
     }
 
     const reply = await callIA({ question: cleaned, customer_id: from, customer_name: pushName });
-    const finalReply = stripSources(reply);
-    await sock.sendMessage(from, { text: finalReply }, { linkPreview: false });
+   const finalReply = stripSources(reply);
+await sock.sendPresenceUpdate('composing', from);
+await new Promise(r => setTimeout(r, 700)); // ~0,7s de pausa "humana"
+await sock.sendMessage(from, { text: finalReply }, { linkPreview: false });
+
   });
 
   // ======= HTTP para QR e health =======
@@ -205,3 +220,4 @@ async function startSock() {
 }
 
 startSock().catch(err => console.error('Erro geral:', err));
+
