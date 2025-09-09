@@ -1,4 +1,6 @@
-// bridge.js — BOT Whats em nuvem (Baileys) chamando sua IA no Render (com HANDOFF & sem "Fontes:")
+// bridge.js — BOT Whats em nuvem (Baileys) chamando sua IA no Render
+// Handoff p/ humano + sem "Fontes:" + retries + keep-alive
+
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') }); // opcional local; no Render usamos vars de ambiente
 
@@ -24,6 +26,9 @@ const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth');
 const HANDOFF_TTL_MS = parseInt(process.env.HANDOFF_TTL_MS || '3600000', 10); // 1h por padrão
 const OPERATOR_PHONE = (process.env.OPERATOR_PHONE || '').replace(/\D/g, ''); // ex.: +5592999999999
 
+// Keep-alive para evitar primeira chamada fria
+const KEEPALIVE_MS = Number(process.env.KEEPALIVE_MS || 240000); // 4 min
+
 if (!APP_URL) {
   console.error('Defina APP_URL (ex.: https://desfrut-ia.onrender.com)');
   process.exit(1);
@@ -33,17 +38,29 @@ const logger = Pino({ level: 'info' });
 let lastQR = null;
 let isOpen = false;
 
-// ======= IA (sua API Flask no Render) =======
+// ======= IA (sua API Flask no Render) — com RETRIES =======
 async function callIA(payload) {
-  try {
-    const res = await axios.post(`${APP_URL}/ask`, payload, { timeout: TIMEOUT_MS });
-    const { answer } = res.data || {};
-    return answer || 'Sem resposta.';
-  } catch (e) {
-    logger.error({ err: e?.message }, 'Falha ao consultar IA');
-    return 'Desculpa! O serviço está acordando ou indisponível agora. Tente novamente em alguns segundos 🙏';
+  const tries = [0, 600, 1500]; // 3 tentativas com backoff
+  let lastErr;
+  for (const wait of tries) {
+    if (wait) await new Promise(r => setTimeout(r, wait));
+    try {
+      const res = await axios.post(`${APP_URL}/ask`, payload, { timeout: TIMEOUT_MS });
+      const { answer } = res.data || {};
+      return answer || 'Sem resposta.';
+    } catch (e) {
+      lastErr = e;
+    }
   }
+  logger.error({ err: lastErr?.message }, 'Falha ao consultar IA');
+  return 'Desculpa! O serviço está acordando ou indisponível agora. Tente novamente em alguns segundos 🙏';
 }
+
+// Mantém a IA “acordada”
+async function pingIA() {
+  try { await axios.get(`${APP_URL}/healthz`, { timeout: 5000 }); } catch {}
+}
+setInterval(pingIA, KEEPALIVE_MS);
 
 function isGroup(jid) {
   return jid.endsWith('@g.us');
@@ -110,6 +127,8 @@ async function startSock() {
       if (OPERATOR_PHONE) {
         try { await sock.sendMessage(waJid(OPERATOR_PHONE), { text: '✅ Bot conectado e online.' }); } catch {}
       }
+      // já dá um ping inicial na IA
+      pingIA().catch(()=>{});
     }
   });
 
@@ -136,18 +155,6 @@ async function startSock() {
     if (!cleaned) return;
 
     const pushName = up.pushName || 'Cliente';
-    
-    // Escalonar automático se parecer problema/sinistro
-if (/(reclamaç|reclamacao|defeit|não funciona|nao funciona|quebrad|troca|devolver|procon)/i.test(cleaned)) {
-  handoff[from] = Date.now() + HANDOFF_TTL_MS;
-  saveJson(HANDOFF_DB, handoff);
-  await sock.sendMessage(from, { text: 'Sinto muito por isso! Vou te conectar com um atendente humano agora para resolver direitinho. Se preferir voltar ao autoatendimento depois, é só enviar: "voltar".' });
-  if (OPERATOR_PHONE) {
-    await sock.sendMessage(waJid(OPERATOR_PHONE), { text: `⚠️ Escalonado automaticamente\nCliente: ${pushName} (${from})\nMsg: “${cleaned}”` });
-  }
-  return;
-}
-
 
     // ======= HANDOFF: comandos =======
     if (/^(quero falar com atendente|falar com atendente|atendente|humano)\b/i.test(cleaned)) {
@@ -182,11 +189,8 @@ if (/(reclamaç|reclamacao|defeit|não funciona|nao funciona|quebrad|troca|devol
     }
 
     const reply = await callIA({ question: cleaned, customer_id: from, customer_name: pushName });
-   const finalReply = stripSources(reply);
-await sock.sendPresenceUpdate('composing', from);
-await new Promise(r => setTimeout(r, 700)); // ~0,7s de pausa "humana"
-await sock.sendMessage(from, { text: finalReply }, { linkPreview: false });
-
+    const finalReply = stripSources(reply);
+    await sock.sendMessage(from, { text: finalReply }, { linkPreview: false });
   });
 
   // ======= HTTP para QR e health =======
@@ -220,4 +224,3 @@ await sock.sendMessage(from, { text: finalReply }, { linkPreview: false });
 }
 
 startSock().catch(err => console.error('Erro geral:', err));
-
