@@ -15,8 +15,8 @@ const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
 const res = await axios.post(`${APP_URL}/ask`, {
   question,
-  customer_id: from,                 // identifica o cliente no estado (evita misturar contextos)
-  customer_name: up.pushName || ""   // nome exibido no Whats
+  customer_id: from,
+  customer_name: up.pushName || ""
 }, { timeout: TIMEOUT_MS });
 
 
@@ -229,4 +229,5 @@ async function startSock() {
 }
 
 startSock().catch(err => console.error('Erro geral:', err));
+
 
