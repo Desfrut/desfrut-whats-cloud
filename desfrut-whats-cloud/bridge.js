@@ -13,7 +13,12 @@ const express = require('express');
 const Pino = require('pino');
 const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
-const axios = require('axios');
+const res = await axios.post(`${APP_URL}/ask`, {
+  question,
+  customer_id: from,                 // identifica o cliente no estado (evita misturar contextos)
+  customer_name: up.pushName || ""   // nome exibido no Whats
+}, { timeout: TIMEOUT_MS });
+
 
 // ======= VARIÁVEIS DE AMBIENTE =======
 const APP_URL = (process.env.APP_URL || '').replace(/\/+$/, '');
@@ -224,3 +229,4 @@ async function startSock() {
 }
 
 startSock().catch(err => console.error('Erro geral:', err));
+
